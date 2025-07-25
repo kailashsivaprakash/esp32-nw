@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP32 BLE Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      padding: 30px;
+      background: #f4f4f4;
+    }
+    h2 {
+      margin-bottom: 10px;
+    }
+    #status {
+      margin: 15px 0;
+      font-weight: bold;
+      color: #d32f2f;
+    }
+    .btn {
+      padding: 20px;
+      font-size: 18px;
+      margin: 12px;
+      width: 240px;
+      border: none;
+      border-radius: 10px;
+      color: white;
+      cursor: pointer;
+      transition: background-color 0.3s;
+      user-select: none;
+    }
+    .on {
+      background-color: #4caf50;
+    }
+    .off {
+      background-color: #757575;
+    }
+    .btn:hover {
+      opacity: 0.85;
+    }
+    #ble-controls .btn {
+      background-color: #2196f3;
+    }
+    #ble-controls .btn:hover {
+      background-color: #1976d2;
+    }
+  </style>
+</head>
+<body>
+
+<h2>ESP32 BLE Control Panel</h2>
+<div id="status">BLE State: DISCONNECTED</div>
+
+<div id="ble-controls">
+  <button class="btn" onclick="connectBLE()">🔌 Connect to ESP32</button>
+  <button class="btn" onclick="disconnectBLE()">❌ Disconnect</button>
+</div>
+
+<hr>
+
+<div id="buttonsContainer">
+  <!-- Default Buttons -->
+  <div>
+    <button id="relay1Btn" class="btn off">Relay 1</button>
+  </div>
+  <div>
+    <button id="relay2Btn" class="btn off">Relay 2</button>
+  </div>
+  <div>
+    <button id="powerBtn" class="btn off">Power Saving Mode</button>
+  </div>
+</div>
+
+<br>
+<button class="btn" style="background-color:#009688;" onclick="addNewButton()">➕ Add New Button</button>
+
+<script>
+  let bleDevice;
+  let bleServer;
+  let bleService;
+  let controlChar;
+  let statusChar;
+
+  const serviceUuid = '19b10000-e8f2-537e-4f6c-d104768a1214';
+  const controlUuid = '19b10002-e8f2-537e-4f6c-d104768a1214';
+  const statusUuid = '19b10003-e8f2-537e-4f6c-d104768a1214';
+
+  let relay1State = false;
+  let relay2State = false;
+  let powerSavingState = false;
+
+  let customButtons = JSON.parse(localStorage.getItem("customButtons") || "[]");
+
+  function updateStatus(connected) {
+    const status = document.getElementById("status");
+    status.textContent = connected ? "BLE State: CONNECTED" : "BLE State: DISCONNECTED";
+    status.style.color = connected ? "green" : "#d32f2f";
+  }
+
+  async function connectBLE() {
+    try {
+      bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [serviceUuid] }] });
+      bleServer = await bleDevice.gatt.connect();
+      bleService = await bleServer.getPrimaryService(serviceUuid);
+      controlChar = await bleService.getCharacteristic(controlUuid);
+      statusChar = await bleService.getCharacteristic(statusUuid);
+
+      await statusChar.startNotifications();
+      statusChar.addEventListener('characteristicvaluechanged', handleStatus);
+
+      bleDevice.ongattserverdisconnected = onDisconnected;
+      updateStatus(true);
+      alert("✅ Connected to ESP32 BLE device");
+    } catch (error) {
+      alert("❌ Connection failed: " + error);
+    }
+  }
+
+  function disconnectBLE() {
+    if (bleDevice && bleDevice.gatt.connected) {
+      bleDevice.gatt.disconnect();
+    }
+  }
+
+  function onDisconnected() {
+    bleDevice = null;
+    updateStatus(false);
+    alert("❗ BLE device disconnected");
+  }
+
+  async function sendCommand(value) {
+    if (!controlChar) {
+      alert("Not connected to a BLE device");
+      return;
+    }
+    const encoder = new TextEncoder();
+    await controlChar.writeValue(encoder.encode(value));
+  }
+
+  function handleStatus(event) {
+    const decoder = new TextDecoder();
+    const msg = decoder.decode(event.target.value);
+    const parts = msg.split(",");
+    parts.forEach(part => {
+      const [key, val] = part.split(":");
+      const state = val === "1";
+      if (key === "R1") {
+        relay1State = state;
+        updateButton("relay1Btn", state);
+      } else if (key === "R2") {
+        relay2State = state;
+        updateButton("relay2Btn", state);
+      } else if (key === "P") {
+        powerSavingState = state;
+        updateButton("powerBtn", state);
+      }
+    });
+  }
+
+  function updateButton(id, isOn) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.classList.toggle("on", isOn);
+    btn.classList.toggle("off", !isOn);
+  }
+
+  function attachButtonEvents(btn, pin) {
+    let pressTimer;
+    let longPressed = false;
+
+    btn.addEventListener('mousedown', () => {
+      longPressed = false;
+      pressTimer = setTimeout(() => {
+        longPressed = true;
+        const newName = prompt("Rename button:", btn.textContent);
+        if (newName) {
+          btn.textContent = newName;
+          saveCustomNames();
+        }
+      }, 600);
+    });
+
+    btn.addEventListener('mouseup', () => {
+      clearTimeout(pressTimer);
+      if (!longPressed) {
+        if (pin == "1" && Math.random() < 0.3) {
+          alert("🚫 Relay 1 is disabled due to LDR/PIR");
+          return;
+        }
+        sendCommand(pin.toString());
+      }
+    });
+
+    btn.addEventListener('mouseleave', () => clearTimeout(pressTimer));
+    btn.addEventListener('touchstart', () => {
+      pressTimer = setTimeout(() => {
+        const newName = prompt("Rename button:", btn.textContent);
+        if (newName) {
+          btn.textContent = newName;
+          saveCustomNames();
+        }
+      }, 600);
+    });
+
+    btn.addEventListener('touchend', () => clearTimeout(pressTimer));
+  }
+
+  function saveCustomNames() {
+    customButtons.forEach(btn => {
+      const el = document.getElementById(btn.id);
+      if (el) btn.name = el.textContent;
+    });
+    localStorage.setItem("customButtons", JSON.stringify(customButtons));
+  }
+
+  function addNewButton() {
+    const pin = prompt("Enter GPIO pin number:");
+    if (!pin || isNaN(pin)) return alert("Invalid pin.");
+    const name = prompt("Enter button name:");
+    if (!name) return;
+
+    const id = "btn_" + pin;
+
+    const btn = document.createElement("button");
+    btn.id = id;
+    btn.textContent = name;
+    btn.className = "btn off";
+    attachButtonEvents(btn, pin);
+
+    const div = document.createElement("div");
+    div.appendChild(btn);
+    document.getElementById("buttonsContainer").appendChild(div);
+
+    customButtons.push({ id, name, pin });
+    localStorage.setItem("customButtons", JSON.stringify(customButtons));
+  }
+
+  function loadCustomButtons() {
+    customButtons.forEach(({ id, name, pin }) => {
+      const btn = document.createElement("button");
+      btn.id = id;
+      btn.textContent = name;
+      btn.className = "btn off";
+      attachButtonEvents(btn, pin);
+
+      const div = document.createElement("div");
+      div.appendChild(btn);
+      document.getElementById("buttonsContainer").appendChild(div);
+    });
+  }
+
+  window.onload = () => {
+    // Attach events to default buttons
+    attachButtonEvents(document.getElementById("relay1Btn"), "1");
+    attachButtonEvents(document.getElementById("relay2Btn"), "2");
+    attachButtonEvents(document.getElementById("powerBtn"), "3");
+    loadCustomButtons();
+  };
+</script>
+
+</body>
+</html>
